@@ -4,9 +4,10 @@
 Evaluación de importancia de variables mediante ghost variables usando GAM.
 
 Idea básica:
-- Para cada predictor X_j, se ajusta un GAM univariado y se calcula su pseudo-R².
-- Se generan n_ghost réplicas "fantasma" barajando los valores de X_j (rompiendo
-  la relación con la respuesta) y se ajusta el mismo GAM.
+- Para cada predictor X_j, se ajusta un GAM univariado y se calcula un pseudo-R²
+  (tipo R² clásico) en la muestra.
+- Se generan n_ghost réplicas "fantasma" barajando los valores de X_j
+  (rompiendo la relación con la respuesta) y se ajusta el mismo GAM.
 - Se compara el pseudo-R² de la variable real vs la distribución de pseudo-R²
   de las versiones ghost.
 
@@ -16,40 +17,50 @@ Salida:
     * pseudo_r2_ghost_mean
     * pseudo_r2_ghost_std
     * delta_r2 = real - media_ghost
-    * p_ghost = fracción de ghosts cuyo pseudo-R² ≥ pseudo_r2_real
+    * p_ghost = fracción de ghosts que igualan o superan al real
 """
 
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 import pandas as pd
 from pygam import LinearGAM, s
 
 
-def _fit_univariate_gam(
-    X: np.ndarray,
-    y: np.ndarray,
-) -> float:
+def _fit_univariate_gam(X: np.ndarray, y: np.ndarray) -> float:
     """
-    Ajusta un GAM univariado (s(0)) y devuelve el pseudo-R².
+    Ajusta un GAM univariado (s(0)) y devuelve un pseudo-R² tipo R² clásico:
 
-    Parámetros
-    ----------
-    X : np.ndarray, shape (n_samples, 1)
-        Predictor univariado.
-    y : np.ndarray, shape (n_samples,)
-        Respuesta (típicamente log del gas, ya transformada).
+        R² = 1 - sum((y - y_hat)^2) / sum((y - mean(y))^2)
 
-    Devuelve
-    --------
-    pseudo_r2 : float
-        Pseudo-R² reportado por pygam.
+    Ignora filas con NaN / inf.
     """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    # Máscara de valores finitos
+    mask = np.isfinite(X[:, 0]) & np.isfinite(y)
+    Xm = X[mask]
+    ym = y[mask]
+
+    # Si hay muy pocos datos no tiene sentido ajustar
+    if Xm.shape[0] < 5:
+        return np.nan
+
+    # Ajustar GAM univariado
     gam = LinearGAM(s(0))
-    gam.gridsearch(X, y)
-    stats = gam.statistics_
-    pseudo_r2 = float(stats.get("pseudo_r2", np.nan))
-    return pseudo_r2
+    gam.gridsearch(Xm, ym)
+
+    # Predicciones y pseudo-R²
+    y_hat = gam.predict(Xm)
+    ss_res = float(np.sum((ym - y_hat) ** 2))
+    ss_tot = float(np.sum((ym - ym.mean()) ** 2))
+
+    if ss_tot <= 0:
+        return np.nan
+
+    pseudo_r2 = 1.0 - ss_res / ss_tot
+    return float(pseudo_r2)
 
 
 def compute_ghost_importance(
@@ -64,16 +75,13 @@ def compute_ghost_importance(
     """
     Calcula importancia tipo ghost variable para cada predictor en pred_cols.
 
-    Parámetros
-    ----------
     df : DataFrame
         Debe contener la columna de respuesta (response_col) y los predictores
         en pred_cols. Cada fila es una observación (p.ej. celda–mes para un gas).
     pred_cols : list of str
         Nombres de las columnas predictoras (p.ej. ['T2m_C', 'BLH', ...]).
     response_col : str
-        Nombre de la columna de respuesta (p.ej. 'value' del gas o
-        'y_no2_log' si ya está log-transformada).
+        Nombre de la columna de respuesta (p.ej. 'value' del gas).
     log_transform : bool
         Si True, se aplica log a la respuesta: y = log(max(response_col, min_value)).
         Si False, se usa la respuesta tal cual.
@@ -137,8 +145,8 @@ def compute_ghost_importance(
         ghost_r2 = np.array(ghost_r2, dtype=float)
 
         # Estadísticas ghost
-        ghost_mean = np.nanmean(ghost_r2)
-        ghost_std = np.nanstd(ghost_r2)
+        ghost_mean = float(np.nanmean(ghost_r2))
+        ghost_std = float(np.nanstd(ghost_r2))
 
         # Diferencia de pseudo-R²
         delta_r2 = pseudo_r2_real - ghost_mean
@@ -160,7 +168,6 @@ def compute_ghost_importance(
         })
 
     df_imp = pd.DataFrame(results)
-    # Ordenar de más importante (mayor delta_r2) a menos
     df_imp = df_imp.sort_values("delta_r2", ascending=False).reset_index(drop=True)
 
     return df_imp
