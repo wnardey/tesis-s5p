@@ -1,25 +1,21 @@
 # src/ghost_variable.py
 # -*- coding: utf-8 -*-
 """
-Utilidades para analizar importancia de covariables mediante
-la metodología de 'ghost variables' usando GAM (pyGAM).
+Utilidades para análisis de importancia de covariables usando
+el enfoque de 'ghost variables' sobre GAMs.
 
-Enfoque:
-- Ajustamos un GAM en la escala logarítmica de la variable de respuesta.
-- Calculamos un pseudo-R² del modelo real.
-- Para cada covariable, generamos n_ghost modelos donde esa columna
-  es reemplazada por una 'ghost variable' (permuta aleatoria).
-- Comparamos el pseudo-R² real vs. la distribución de pseudo-R² ghost.
-
-Funciones públicas:
-- compute_ghost_importance
-- summarize_ghost_importance
+- compute_ghost_importance: calcula pseudo-R² real vs ghost por variable.
+- summarize_ghost_importance: ordena y deja tabla lista para reporte.
+- plot_ghost_heatmap: heatmap multigás de importancia relativa.
 """
 
-from typing import List, Dict, Any, Optional
+from __future__ import annotations
+
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from pygam import LinearGAM, s
 
 
@@ -27,49 +23,35 @@ from pygam import LinearGAM, s
 # Helpers internos
 # ---------------------------------------------------------------------
 
-def _pseudo_r2(y_true: np.ndarray, y_hat: np.ndarray) -> float:
+
+def _fit_gam(X: np.ndarray, y: np.ndarray) -> LinearGAM:
     """
-    Pseudo-R² tipo R² clásico en la escala (log) de trabajo.
-
-    R² = 1 - SSE/SST
+    Ajusta un GAM lineal con un término suave por cada columna de X.
+    Devuelve el modelo ya ajustado.
     """
-    y_true = np.asarray(y_true, dtype=float)
-    y_hat = np.asarray(y_hat, dtype=float)
-
-    mask = np.isfinite(y_true) & np.isfinite(y_hat)
-    if mask.sum() < 3:
-        return np.nan
-
-    y_true = y_true[mask]
-    y_hat = y_hat[mask]
-
-    ss_res = np.sum((y_true - y_hat) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-
-    if ss_tot <= 0:
-        return np.nan
-
-    return 1.0 - ss_res / ss_tot
-
-
-def _build_gam(n_features: int, lam: Optional[np.ndarray] = None) -> LinearGAM:
-    """
-    Construye un LinearGAM con un término suave s(i) por feature.
-    Si lam no es None, se fija ese valor de suavizado.
-    """
-    terms = None
-    for i in range(n_features):
-        terms = s(i) if terms is None else terms + s(i)
+    n_features = X.shape[1]
+    terms = sum([s(i) for i in range(n_features)])
 
     gam = LinearGAM(terms)
-    if lam is not None:
-        gam.lam = lam
+    gam.gridsearch(X, y)
     return gam
 
 
+def _pseudo_r2_from_gam(gam: LinearGAM) -> float:
+    """
+    Extrae el pseudo-R² desde el objeto GAM (pyGAM).
+    Si no está disponible, devuelve NaN.
+    """
+    stats = getattr(gam, "statistics_", None)
+    if stats is None:
+        return np.nan
+    return float(stats.get("pseudo_r2", np.nan))
+
+
 # ---------------------------------------------------------------------
-# API principal
+# API pública
 # ---------------------------------------------------------------------
+
 
 def compute_ghost_importance(
     df: pd.DataFrame,
@@ -77,43 +59,39 @@ def compute_ghost_importance(
     response_col: str = "value",
     log_transform: bool = True,
     n_ghost: int = 20,
-    random_state: Optional[int] = None,
-    min_n: int = 30,
+    random_state: int | None = None,
 ) -> pd.DataFrame:
     """
-    Calcula la importancia tipo 'ghost variable' para cada predictor.
+    Calcula importancia tipo 'ghost variable' para cada covariable en pred_cols.
 
-    Parámetros
-    ----------
-    df : DataFrame
-        Datos ya filtrados para un gas específico (una fila ~ celda-mes).
-    pred_cols : list of str
-        Nombres de las columnas predictoras (covariables meteorológicas).
-    response_col : str
-        Nombre de la columna respuesta (ej. 'value').
-    log_transform : bool
-        Si True, se trabaja en log(respuesta) para el GAM.
-    n_ghost : int
-        Número de réplicas ghost por variable.
-    random_state : int o None
-        Semilla para el generador aleatorio.
-    min_n : int
-        Mínimo de filas requeridas para correr el análisis.
+    Para cada variable v en pred_cols:
+      1) Ajusta un GAM con todas las covariables reales -> pseudo_R2_real.
+      2) Genera n_ghost "ghosts" para v (barajando la columna de v),
+         re-ajusta el GAM cada vez -> pseudo_R2_ghost_i.
+      3) Resume: media, std y p_ghost = P(R2_ghost >= R2_real).
 
-    Devuelve
-    --------
-    DataFrame con columnas:
-        ['var', 'pseudo_r2_real', 'pseudo_r2_ghost_mean',
-         'pseudo_r2_ghost_std', 'delta_r2', 'p_ghost', 'n_ghost']
+    Devuelve un DataFrame con columnas:
+      ['var', 'pseudo_r2_real', 'pseudo_r2_ghost_mean',
+       'pseudo_r2_ghost_std', 'delta_r2', 'p_ghost', 'n_ghost']
     """
+
     rng = np.random.default_rng(random_state)
 
-    cols_needed = pred_cols + [response_col]
-    df_work = df[cols_needed].dropna().copy()
+    # Respuesta
+    y = df[response_col].to_numpy(dtype=float)
+    if log_transform:
+        y = np.log(np.clip(y, 1e-8, None))
 
-    n = len(df_work)
-    if n < min_n:
-        # Demasiado pocos datos → devolvemos tabla vacía
+    rows = []
+
+    # GAM base: todas las covariables reales
+    X_full = df[pred_cols].to_numpy(dtype=float)
+
+    try:
+        gam_real = _fit_gam(X_full, y)
+        r2_real = _pseudo_r2_from_gam(gam_real)
+    except Exception:
+        # Si el ajuste base falla, no hay nada que hacer
         return pd.DataFrame(
             columns=[
                 "var",
@@ -126,72 +104,54 @@ def compute_ghost_importance(
             ]
         )
 
-    # --------------------------------------------------------------
-    # 1) Preparar X, y (con log-transform si aplica)
-    # --------------------------------------------------------------
-    X = df_work[pred_cols].to_numpy(dtype=float)
-    y = df_work[response_col].to_numpy(dtype=float)
+    for var in pred_cols:
+        ghost_r2: List[float] = []
 
-    if log_transform:
-        y = np.log(np.clip(y, 1e-8, None))
+        x_real = df[pred_cols].to_numpy(dtype=float)
+        col_idx = pred_cols.index(var)
+        original_col = x_real[:, col_idx].copy()
 
-    n_features = X.shape[1]
+        for _ in range(n_ghost):
+            x_ghost = x_real.copy()
+            # Ghost = barajar la columna (misma distribución, rompe relación con y)
+            shuffled = original_col.copy()
+            rng.shuffle(shuffled)
+            x_ghost[:, col_idx] = shuffled
 
-    # --------------------------------------------------------------
-    # 2) Ajustar GAM completo (todas las covariables)
-    # --------------------------------------------------------------
-    gam_full = _build_gam(n_features)
-    # gridsearch básico de lambda (podrías refinarlo si quieres)
-    gam_full.gridsearch(X, y)
-
-    y_hat_full = gam_full.predict(X)
-    r2_full = _pseudo_r2(y, y_hat_full)
-
-    rows: List[Dict[str, Any]] = []
-
-    # --------------------------------------------------------------
-    # 3) Para cada variable: reemplazarla por ghost y recomputar R²
-    # --------------------------------------------------------------
-    for j, var in enumerate(pred_cols):
-        ghost_r2 = []
-
-        for k in range(n_ghost):
-            Xg = X.copy()
-
-            # Ghost variable: permutación aleatoria de la columna j
-            ghost_col = rng.permutation(X[:, j])
-            Xg[:, j] = ghost_col
-
-            gam_g = _build_gam(n_features, lam=gam_full.lam)
             try:
-                gam_g.fit(Xg, y)
-                y_hat_g = gam_g.predict(Xg)
-                r2_g = _pseudo_r2(y, y_hat_g)
+                gam_g = _fit_gam(x_ghost, y)
+                r2_g = _pseudo_r2_from_gam(gam_g)
+                if np.isfinite(r2_g):
+                    ghost_r2.append(r2_g)
             except Exception:
-                r2_g = np.nan
+                # Si falla un ajuste ghost, se ignora
+                continue
 
-            if np.isfinite(r2_g):
-                ghost_r2.append(r2_g)
+        if len(ghost_r2) == 0 or not np.isfinite(r2_real):
+            rows.append(
+                dict(
+                    var=var,
+                    pseudo_r2_real=np.nan,
+                    pseudo_r2_ghost_mean=np.nan,
+                    pseudo_r2_ghost_std=np.nan,
+                    delta_r2=np.nan,
+                    p_ghost=np.nan,
+                    n_ghost=n_ghost,
+                )
+            )
+            continue
 
-        if len(ghost_r2) == 0 or not np.isfinite(r2_full):
-            pseudo_r2_real = np.nan
-            ghost_mean = np.nan
-            ghost_std = np.nan
-            delta_r2 = np.nan
-            p_ghost = np.nan
-        else:
-            ghost_arr = np.asarray(ghost_r2, dtype=float)
-            pseudo_r2_real = r2_full
-            ghost_mean = float(ghost_arr.mean())
-            ghost_std = float(ghost_arr.std(ddof=1)) if len(ghost_arr) > 1 else 0.0
-            delta_r2 = max(0.0, r2_full - ghost_mean)
-            # p_ghost: fracción de réplicas ghost cuyo pseudo-R² >= real
-            p_ghost = float((ghost_arr >= r2_full).mean())
+        ghost_r2 = np.array(ghost_r2, dtype=float)
+        ghost_mean = float(ghost_r2.mean())
+        ghost_std = float(ghost_r2.std(ddof=1)) if len(ghost_r2) > 1 else 0.0
+
+        delta_r2 = max(r2_real - ghost_mean, 0.0)
+        p_ghost = float((ghost_r2 >= r2_real).mean())
 
         rows.append(
             dict(
                 var=var,
-                pseudo_r2_real=pseudo_r2_real,
+                pseudo_r2_real=float(r2_real),
                 pseudo_r2_ghost_mean=ghost_mean,
                 pseudo_r2_ghost_std=ghost_std,
                 delta_r2=delta_r2,
@@ -205,8 +165,22 @@ def compute_ghost_importance(
 
 def summarize_ghost_importance(df_imp: pd.DataFrame) -> pd.DataFrame:
     """
-    Ordena y deja solo las columnas clave del análisis ghost.
+    Ordena la tabla de importancia por delta_r2 (descendente) y
+    devuelve un DataFrame listo para reporte.
     """
+    if df_imp is None or df_imp.empty:
+        return pd.DataFrame(
+            columns=[
+                "var",
+                "pseudo_r2_real",
+                "pseudo_r2_ghost_mean",
+                "pseudo_r2_ghost_std",
+                "delta_r2",
+                "p_ghost",
+                "n_ghost",
+            ]
+        )
+
     cols = [
         "var",
         "pseudo_r2_real",
@@ -216,14 +190,97 @@ def summarize_ghost_importance(df_imp: pd.DataFrame) -> pd.DataFrame:
         "p_ghost",
         "n_ghost",
     ]
+    existing_cols = [c for c in cols if c in df_imp.columns]
 
-    if df_imp is None or df_imp.empty:
-        return pd.DataFrame(columns=cols)
+    df_out = df_imp[existing_cols].copy()
+    df_out = df_out.sort_values("delta_r2", ascending=False)
+    return df_out.reset_index(drop=True)
 
-    df_out = df_imp.copy()
-    for c in cols:
-        if c not in df_out.columns:
-            df_out[c] = np.nan
 
-    df_out = df_out[cols]
-    return df_out.sort_values("delta_r2", ascending=False).reset_index(drop=True)
+def plot_ghost_heatmap(
+    ghost_results: Dict[str, pd.DataFrame],
+    gases_order: List[str] | None = None,
+    pred_cols_order: List[str] | None = None,
+    figsize: tuple = (8, 6),
+) -> None:
+    """
+    Construye un heatmap multigás con la importancia relativa de cada
+    covariable (delta_r2 normalizado por gas).
+
+    ghost_results: dict gas -> summary_df (salida de summarize_ghost_importance)
+    gases_order: orden explícito de columnas (gases)
+    pred_cols_order: orden explícito de filas (covariables)
+    """
+
+    if not ghost_results:
+        print("⚠ ghost_results está vacío, nada que graficar.")
+        return
+
+    # Eje X: gases
+    if gases_order is None:
+        gases = list(ghost_results.keys())
+    else:
+        gases = [g for g in gases_order if g in ghost_results]
+
+    # Eje Y: covariables
+    if pred_cols_order is None:
+        vars_all = sorted(
+            {v for g in gases for v in ghost_results[g]["var"].tolist()}
+        )
+    else:
+        vars_all = pred_cols_order
+
+    n_vars = len(vars_all)
+    n_gases = len(gases)
+
+    # Matriz de delta_r2 normalizado
+    mat = np.zeros((n_vars, n_gases), dtype=float)
+
+    for j, gas in enumerate(gases):
+        df_sum = ghost_results[gas].set_index("var")
+        # vector de delta_r2 en el orden de vars_all
+        delta_vec = np.array(
+            [df_sum.loc[v, "delta_r2"] if v in df_sum.index else 0.0 for v in vars_all],
+            dtype=float,
+        )
+
+        max_val = np.nanmax(delta_vec) if np.any(np.isfinite(delta_vec)) else 0.0
+        if max_val > 0:
+            delta_norm = delta_vec / max_val
+        else:
+            delta_norm = np.zeros_like(delta_vec)
+
+        mat[:, j] = delta_norm
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(mat, aspect="auto", origin="lower", cmap="viridis")
+
+    ax.set_xticks(np.arange(n_gases))
+    ax.set_xticklabels(gases)
+    ax.set_yticks(np.arange(n_vars))
+    ax.set_yticklabels(vars_all)
+
+    ax.set_xlabel("Gas")
+    ax.set_ylabel("Covariable meteorológica")
+    ax.set_title("Importancia relativa de covariables por gas\n"
+                 "(Δ pseudo-R² normalizado)")
+
+    # Anotar valores numéricos
+    for i in range(n_vars):
+        for j in range(n_gases):
+            val = mat[i, j]
+            ax.text(
+                j,
+                i,
+                f"{val:.2f}",
+                ha="center",
+                va="center",
+                color="white" if val > 0.5 else "black",
+                fontsize=8,
+            )
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Importancia relativa (0–1)")
+
+    plt.tight_layout()
+    plt.show()
