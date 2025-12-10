@@ -20,6 +20,19 @@ from pygam import LinearGAM, s
 
 # -------- Helpers internos --------
 
+def _build_terms(n_feat: int):
+    """
+    Construye s(0) + s(1) + ... + s(n_feat-1) correctamente,
+    sin pasar por sum() que mete un 0 al inicio.
+    """
+    if n_feat <= 0:
+        raise ValueError("n_feat debe ser >= 1")
+    terms = s(0)
+    for j in range(1, n_feat):
+        terms += s(j)
+    return terms
+
+
 def _fit_gam_and_r2(X: np.ndarray, y: np.ndarray) -> float:
     """
     Ajusta un GAM lineal con un término suave por cada columna de X
@@ -38,7 +51,7 @@ def _fit_gam_and_r2(X: np.ndarray, y: np.ndarray) -> float:
         return np.nan
 
     # Términos suaves s(0) + s(1) + ... + s(p-1)
-    terms = sum([s(j) for j in range(n_feat)])
+    terms = _build_terms(n_feat)
 
     gam = LinearGAM(terms)
     gam.fit(X, y)
