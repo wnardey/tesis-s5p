@@ -1,286 +1,186 @@
-# src/ghost_variable.py
-# -*- coding: utf-8 -*-
-"""
-Utilidades para análisis de importancia de covariables usando
-el enfoque de 'ghost variables' sobre GAMs.
-
-- compute_ghost_importance: calcula pseudo-R² real vs ghost por variable.
-- summarize_ghost_importance: ordena y deja tabla lista para reporte.
-- plot_ghost_heatmap: heatmap multigás de importancia relativa.
-"""
-
-from __future__ import annotations
-
-from typing import Dict, List
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from pygam import LinearGAM, s
+from pygam import LinearGAM
+from typing import List, Optional, Tuple, Dict
 
-
-# ---------------------------------------------------------------------
-# Helpers internos
-# ---------------------------------------------------------------------
-
-
-def _fit_gam(X: np.ndarray, y: np.ndarray) -> LinearGAM:
+class GhostVariableAnalyzer:
     """
-    Ajusta un GAM lineal con un término suave por cada columna de X.
-    Devuelve el modelo ya ajustado.
-    """
-    n_features = X.shape[1]
-    terms = sum([s(i) for i in range(n_features)])
-
-    gam = LinearGAM(terms)
-    gam.gridsearch(X, y)
-    return gam
-
-
-def _pseudo_r2_from_gam(gam: LinearGAM) -> float:
-    """
-    Extrae el pseudo-R² desde el objeto GAM (pyGAM).
-    Si no está disponible, devuelve NaN.
-    """
-    stats = getattr(gam, "statistics_", None)
-    if stats is None:
-        return np.nan
-    return float(stats.get("pseudo_r2", np.nan))
-
-
-# ---------------------------------------------------------------------
-# API pública
-# ---------------------------------------------------------------------
-
-
-def compute_ghost_importance(
-    df: pd.DataFrame,
-    pred_cols: List[str],
-    response_col: str = "value",
-    log_transform: bool = True,
-    n_ghost: int = 20,
-    random_state: int | None = None,
-) -> pd.DataFrame:
-    """
-    Calcula importancia tipo 'ghost variable' para cada covariable en pred_cols.
-
-    Para cada variable v en pred_cols:
-      1) Ajusta un GAM con todas las covariables reales -> pseudo_R2_real.
-      2) Genera n_ghost "ghosts" para v (barajando la columna de v),
-         re-ajusta el GAM cada vez -> pseudo_R2_ghost_i.
-      3) Resume: media, std y p_ghost = P(R2_ghost >= R2_real).
-
-    Devuelve un DataFrame con columnas:
-      ['var', 'pseudo_r2_real', 'pseudo_r2_ghost_mean',
-       'pseudo_r2_ghost_std', 'delta_r2', 'p_ghost', 'n_ghost']
+    Implementación del método de Variables Fantasma (Ghost Variables) 
+    para interpretabilidad de modelos predictivos.
+    
+    Referencia: Delicado, P., & Peña, D. (2023). Understanding complex 
+    predictive models with ghost variables.
     """
 
-    rng = np.random.default_rng(random_state)
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
 
-    # Respuesta
-    y = df[response_col].to_numpy(dtype=float)
-    if log_transform:
-        y = np.log(np.clip(y, 1e-8, None))
+    def _fit_gam(self, X: np.ndarray, y: np.ndarray) -> Tuple[LinearGAM, float, float]:
+        """Ajusta un modelo GAM y retorna el objeto modelo, el R2 y la suma total de cuadrados."""
+        try:
+            gam = LinearGAM(verbose=self.verbose).fit(X, y)
+            y_pred = gam.predict(X)
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - y.mean()) ** 2)
+            
+            # Evitar división por cero
+            if ss_tot == 0:
+                return gam, np.nan, 0.0
+                
+            r2 = 1.0 - (ss_res / ss_tot)
+            return gam, r2, ss_tot
+        except Exception:
+            return None, np.nan, 0.0
 
-    rows = []
+    def _get_ghost_feature(self, X_rest: np.ndarray, z_target: np.ndarray) -> np.ndarray:
+        """Genera la variable fantasma prediciendo Z en función del resto de variables (X_rest)."""
+        try:
+            # Ajustamos modelo auxiliar Z ~ X_rest
+            gam_aux, r2, _ = self._fit_gam(X_rest, z_target)
+            if gam_aux is None:
+                return np.full_like(z_target, z_target.mean())
+            return gam_aux.predict(X_rest)
+        except:
+            # Fallback a la media si falla el ajuste auxiliar
+            return np.full_like(z_target, z_target.mean())
 
-    # GAM base: todas las covariables reales
-    X_full = df[pred_cols].to_numpy(dtype=float)
+    def compute_importance(
+        self,
+        df: pd.DataFrame,
+        features: List[str],
+        target: str,
+        log_transform: bool = True
+    ) -> pd.DataFrame:
+        """
+        Calcula la importancia de variables para un dataset específico.
+        """
+        # 1. Preprocesamiento seguro
+        cols = features + [target]
+        sub = df[cols].replace([np.inf, -np.inf], np.nan).dropna()
 
-    try:
-        gam_real = _fit_gam(X_full, y)
-        r2_real = _pseudo_r2_from_gam(gam_real)
-    except Exception:
-        # Si el ajuste base falla, no hay nada que hacer
-        return pd.DataFrame(
-            columns=[
-                "var",
-                "pseudo_r2_real",
-                "pseudo_r2_ghost_mean",
-                "pseudo_r2_ghost_std",
-                "delta_r2",
-                "p_ghost",
-                "n_ghost",
-            ]
-        )
+        if len(sub) < 30: # Umbral mínimo de seguridad estadística
+            return pd.DataFrame()
 
-    for var in pred_cols:
-        ghost_r2: List[float] = []
+        X = sub[features].to_numpy(dtype=float)
+        y = sub[target].to_numpy(dtype=float)
 
-        x_real = df[pred_cols].to_numpy(dtype=float)
-        col_idx = pred_cols.index(var)
-        original_col = x_real[:, col_idx].copy()
+        if log_transform:
+            y = np.log(np.clip(y, 1e-12, None))
 
-        for _ in range(n_ghost):
-            x_ghost = x_real.copy()
-            # Ghost = barajar la columna (misma distribución, rompe relación con y)
-            shuffled = original_col.copy()
-            rng.shuffle(shuffled)
-            x_ghost[:, col_idx] = shuffled
+        # 2. Modelo Base (Y ~ X)
+        main_model, base_r2, ss_tot = self._fit_gam(X, y)
+        
+        if np.isnan(base_r2):
+            return pd.DataFrame()
 
-            try:
-                gam_g = _fit_gam(x_ghost, y)
-                r2_g = _pseudo_r2_from_gam(gam_g)
-                if np.isfinite(r2_g):
-                    ghost_r2.append(r2_g)
-            except Exception:
-                # Si falla un ajuste ghost, se ignora
+        results = []
+
+        # 3. Iteración Ghost
+        for j, var_name in enumerate(features):
+            # Aislar variable objetivo Z y predictores restantes
+            z_target = X[:, j]
+            X_rest = np.delete(X, j, axis=1)
+
+            if X_rest.shape[1] == 0:
                 continue
 
-        if len(ghost_r2) == 0 or not np.isfinite(r2_real):
-            rows.append(
-                dict(
-                    var=var,
-                    pseudo_r2_real=np.nan,
-                    pseudo_r2_ghost_mean=np.nan,
-                    pseudo_r2_ghost_std=np.nan,
-                    delta_r2=np.nan,
-                    p_ghost=np.nan,
-                    n_ghost=n_ghost,
-                )
-            )
-            continue
+            # Generar Ghost Variable (E[Z|X])
+            z_ghost = self._get_ghost_feature(X_rest, z_target)
 
-        ghost_r2 = np.array(ghost_r2, dtype=float)
-        ghost_mean = float(ghost_r2.mean())
-        ghost_std = float(ghost_r2.std(ddof=1)) if len(ghost_r2) > 1 else 0.0
+            # Crear matriz fantasma (reemplazando la original por la predicha)
+            X_ghost = X.copy()
+            X_ghost[:, j] = z_ghost
 
-        delta_r2 = max(r2_real - ghost_mean, 0.0)
-        p_ghost = float((ghost_r2 >= r2_real).mean())
+            # Predecir con el modelo base original (sin reentrenar)
+            y_pred_ghost = main_model.predict(X_ghost)
 
-        rows.append(
-            dict(
-                var=var,
-                pseudo_r2_real=float(r2_real),
-                pseudo_r2_ghost_mean=ghost_mean,
-                pseudo_r2_ghost_std=ghost_std,
-                delta_r2=delta_r2,
-                p_ghost=p_ghost,
-                n_ghost=len(ghost_r2),
-            )
-        )
+            # Calcular métrica de impacto
+            ss_res_ghost = np.sum((y - y_pred_ghost) ** 2)
+            ghost_r2 = 1.0 - (ss_res_ghost / ss_tot)
+            
+            # Delta R2: Cuánto rendimiento pierde el modelo al usar la versión "fantasma"
+            delta_r2 = base_r2 - ghost_r2
 
-    return pd.DataFrame(rows)
+            results.append({
+                "var": var_name,
+                "delta_r2": max(delta_r2, 0.0) # Clipping a 0 para visualización limpia
+            })
 
+        return pd.DataFrame(results).sort_values("delta_r2", ascending=False)
 
-def summarize_ghost_importance(df_imp: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ordena la tabla de importancia por delta_r2 (descendente) y
-    devuelve un DataFrame listo para reporte.
-    """
-    if df_imp is None or df_imp.empty:
-        return pd.DataFrame(
-            columns=[
-                "var",
-                "pseudo_r2_real",
-                "pseudo_r2_ghost_mean",
-                "pseudo_r2_ghost_std",
-                "delta_r2",
-                "p_ghost",
-                "n_ghost",
-            ]
-        )
-
-    cols = [
-        "var",
-        "pseudo_r2_real",
-        "pseudo_r2_ghost_mean",
-        "pseudo_r2_ghost_std",
-        "delta_r2",
-        "p_ghost",
-        "n_ghost",
-    ]
-    existing_cols = [c for c in cols if c in df_imp.columns]
-
-    df_out = df_imp[existing_cols].copy()
-    df_out = df_out.sort_values("delta_r2", ascending=False)
-    return df_out.reset_index(drop=True)
-
-
-def plot_ghost_heatmap(
-    ghost_results: Dict[str, pd.DataFrame],
-    gases_order: List[str] | None = None,
-    pred_cols_order: List[str] | None = None,
-    figsize: tuple = (8, 6),
-) -> None:
-    """
-    Construye un heatmap multigás con la importancia relativa de cada
-    covariable (delta_r2 normalizado por gas).
-
-    ghost_results: dict gas -> summary_df (salida de summarize_ghost_importance)
-    gases_order: orden explícito de columnas (gases)
-    pred_cols_order: orden explícito de filas (covariables)
-    """
-
-    if not ghost_results:
-        print("⚠ ghost_results está vacío, nada que graficar.")
+def plot_heatmap(results_dict: Dict[str, pd.DataFrame], features: List[str]):
+    """Genera el mapa de calor normalizado a partir de los resultados."""
+    if not results_dict:
+        print("No hay resultados para graficar.")
         return
 
-    # Eje X: gases
-    if gases_order is None:
-        gases = list(ghost_results.keys())
-    else:
-        gases = [g for g in gases_order if g in ghost_results]
+    gases = list(results_dict.keys())
+    matrix = np.zeros((len(features), len(gases)))
 
-    # Eje Y: covariables
-    if pred_cols_order is None:
-        vars_all = sorted(
-            {v for g in gases for v in ghost_results[g]["var"].tolist()}
-        )
-    else:
-        vars_all = pred_cols_order
-
-    n_vars = len(vars_all)
-    n_gases = len(gases)
-
-    # Matriz de delta_r2 normalizado
-    mat = np.zeros((n_vars, n_gases), dtype=float)
-
+    # Llenar matriz
     for j, gas in enumerate(gases):
-        df_sum = ghost_results[gas].set_index("var")
-        # vector de delta_r2 en el orden de vars_all
-        delta_vec = np.array(
-            [df_sum.loc[v, "delta_r2"] if v in df_sum.index else 0.0 for v in vars_all],
-            dtype=float,
-        )
-
-        max_val = np.nanmax(delta_vec) if np.any(np.isfinite(delta_vec)) else 0.0
+        df = results_dict[gas]
+        if df.empty: continue
+        
+        # Normalización Min-Max por columna (por gas) para comparabilidad
+        max_val = df["delta_r2"].max()
         if max_val > 0:
-            delta_norm = delta_vec / max_val
-        else:
-            delta_norm = np.zeros_like(delta_vec)
+            for i, feat in enumerate(features):
+                row = df[df["var"] == feat]
+                if not row.empty:
+                    val = row["delta_r2"].iloc[0]
+                    matrix[i, j] = val / max_val
 
-        mat[:, j] = delta_norm
+    # Plotting
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(matrix, aspect="auto", cmap="viridis", origin="upper") # Viridis o Magma
 
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(mat, aspect="auto", origin="lower", cmap="viridis")
+    # Decoración
+    ax.set_xticks(np.arange(len(gases)))
+    ax.set_yticks(np.arange(len(features)))
+    ax.set_xticklabels([g.replace("_TCL", "") for g in gases], weight='bold')
+    ax.set_yticklabels(features)
+    ax.set_title("Importancia Relativa de Variables (Método Ghost)\nDelta R² Normalizado", pad=20)
 
-    ax.set_xticks(np.arange(n_gases))
-    ax.set_xticklabels(gases)
-    ax.set_yticks(np.arange(n_vars))
-    ax.set_yticklabels(vars_all)
+    # Anotaciones
+    for i in range(len(features)):
+        for j in range(len(gases)):
+            val = matrix[i, j]
+            color = "white" if val < 0.6 else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color, fontsize=9)
 
-    ax.set_xlabel("Gas")
-    ax.set_ylabel("Covariable meteorológica")
-    ax.set_title("Importancia relativa de covariables por gas\n"
-                 "(Δ pseudo-R² normalizado)")
-
-    # Anotar valores numéricos
-    for i in range(n_vars):
-        for j in range(n_gases):
-            val = mat[i, j]
-            ax.text(
-                j,
-                i,
-                f"{val:.2f}",
-                ha="center",
-                va="center",
-                color="white" if val > 0.5 else "black",
-                fontsize=8,
-            )
-
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Importancia relativa (0–1)")
-
+    plt.colorbar(im, label="Importancia Relativa (0-1)")
     plt.tight_layout()
     plt.show()
+
+def run_full_analysis(df: pd.DataFrame, features: List[str], gases: List[str]):
+    """Orquestador principal que imprime los logs requeridos y genera el gráfico."""
+    
+    print("Iniciando análisis de Variables Fantasma...\n")
+    analyzer = GhostVariableAnalyzer()
+    results_store = {}
+
+    for gas in gases:
+        # Filtrar datos para el gas actual
+        df_gas = df[df["gas"] == gas].copy()
+        n_rows = len(df_gas)
+        
+        print(f"Analizando {gas} ({n_rows} filas)...")
+        
+        if n_rows < 30:
+            print(" -> Saltando por insuficiencia de datos.\n")
+            continue
+
+        # Cálculo
+        df_imp = analyzer.compute_importance(df_gas, features, target="value")
+        
+        if not df_imp.empty:
+            top_var = df_imp.iloc[0]
+            print(f" -> Completado. Variable más importante: {top_var['var']} (Delta R2: {top_var['delta_r2']:.4f})\n")
+            results_store[gas] = df_imp
+        else:
+            print(" -> No se pudo converger o R2 negativo.\n")
+
+    # Visualización final
+    plot_heatmap(results_store, features)
