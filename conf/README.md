@@ -39,11 +39,11 @@ tesis-s5p/
 │  └─ README.md          # (este archivo)
 ├─ .gitignore            # ignora datos pesados, checkpoints, etc.
 └─ README.md
----
 
-## 2. Diagrama de flujo del codigo
 
-<img width="2029" height="1030" alt="Image" src="https://github.com/user-attachments/assets/130c6ceb-7d4a-469e-9945-c375251ccaff" />
+```markdown
+![Diagrama CRISP-DM](https://github.com/user-attachments/assets/130c6ceb-7d4a-469e-9945-c375251ccaff)
+
 
 
 
