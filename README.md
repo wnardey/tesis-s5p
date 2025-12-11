@@ -20,8 +20,7 @@ El enfoque es **multigás** (NO₂, CH₄, ozono troposférico, CO) y está estr
 
 ```text
 tesis-s5p/
-├─ conf/
-│  └─ README.md          # notas de configuración
+│  
 ├─ data/
 │  ├─ raw/               # datos crudos / exportes desde Colab (gitkeep)
 │  └─ processed/         # resultados procesados (gitkeep)
@@ -47,6 +46,7 @@ tesis-s5p/
 ## 2. Diagrama de Flujo del codigo
 
 <img width="1015" height="445" alt="Image" src="https://github.com/user-attachments/assets/3ca23717-1232-438e-8d9f-e78648d797c7" />
+
 
 
 
