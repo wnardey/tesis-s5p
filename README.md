@@ -43,9 +43,10 @@ tesis-s5p/
 ```
 ---
 
-## 2. Diagrama de Flujo del codigo
+## 2. Diagrama de Flujo del código
 
 <img width="1015" height="445" alt="Image" src="https://github.com/user-attachments/assets/3ca23717-1232-438e-8d9f-e78648d797c7" />
+
 
 
 
