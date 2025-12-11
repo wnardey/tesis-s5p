@@ -40,4 +40,6 @@ tesis-s5p/
 ├─ .gitignore            # ignora datos pesados, checkpoints, etc.
 └─ README.md
 
-<img width="2029" height="1030" alt="diagrama" src="https://github.com/user-attachments/assets/c705cda2-5086-4aec-a7b9-c465c3319a18" />
+<img width="2029" height="1030" alt="Image" src="https://github.com/user-attachments/assets/130c6ceb-7d4a-469e-9945-c375251ccaff" />
+
+
