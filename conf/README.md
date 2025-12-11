@@ -41,8 +41,10 @@ tesis-s5p/
 └─ README.md
 
 
-```markdown
-![Diagrama CRISP-DM](https://github.com/user-attachments/assets/130c6ceb-7d4a-469e-9945-c375251ccaff)
+```
+
+<img width="1015" height="445" alt="Image" src="https://github.com/user-attachments/assets/3ca23717-1232-438e-8d9f-e78648d797c7" />
+
 
 
 
