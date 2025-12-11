@@ -32,3 +32,6 @@ data/processed/*
 conf/credentials.yaml
 *.pem
 *.key
+
+# Permitir CSV procesados en el repo
+!data/processed/*.csv
