@@ -21,7 +21,7 @@ El enfoque es **multigás** (NO₂, CH₄, ozono troposférico, CO) y está estr
 ```text
 tesis-s5p/
 ├─ conf/
-│  └─ README.md          # (opcional) notas de configuración
+│  └─ README.md          # notas de configuración
 ├─ data/
 │  ├─ raw/               # datos crudos / exportes desde Colab (gitkeep)
 │  └─ processed/         # resultados procesados (gitkeep)
@@ -29,7 +29,7 @@ tesis-s5p/
 │  └─ 01_run_aoi_grid.ipynb   # notebook principal del pipeline
 ├─ src/
 │  ├─ __init__.py
-│  ├─ config.py          # get_default_params(...): AOI, años, meses, gases, QA, grilla
+│  ├─ config.py          # get_default_params(...): AOI, gases, QA, grilla
 │  ├─ geo_helpers.py     # construcción AOI (GAUL) + grilla (fishnet)
 │  ├─ s5p_helpers.py     # inventario S5P y extracción mensual por gas
 │  ├─ era5_helpers.py    # extracción y agregación mensual de ERA5
@@ -47,6 +47,7 @@ tesis-s5p/
 ## 2. Diagrama de Flujo del codigo
 
 <img width="1015" height="445" alt="Image" src="https://github.com/user-attachments/assets/3ca23717-1232-438e-8d9f-e78648d797c7" />
+
 
 
 
