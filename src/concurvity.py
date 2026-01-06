@@ -14,35 +14,70 @@ Idea:
   en el espacio generado por el resto de términos" (concurvity alta = más redundancia).
 """
 
+"""
+Módulo para auditoría de independencia estructural (concurvity) en modelos GAM.
+Implementa la validación metodológica según Walker et al. (2023).
+"""
+
 import numpy as np
 import pandas as pd
 from pygam import GAM
+
+def _safe_get_statistics(gam: GAM):
+    """
+    Intenta obtener estadísticas nativas del GAM si están disponibles.
+    Maneja diferencias de versión en pygam.
+    """
+    stats = getattr(gam, "statistics_", None)
+    if stats is not None:
+        return stats
+    try:
+        return gam.statistics()
+    except Exception:
+        return None
 
 def compute_concurvity(
     gam: GAM,
     X: np.ndarray,
     feature_names: list = None,
 ) -> pd.DataFrame:
+    """
+    Calcula la concurvidad (dependencia no lineal) de los predictores.
     
-    # Asegurar formato numpy
+    Si pygam no expone la estadística nativa, estima una aproximación 
+    post-hoc calculando el R^2 de cada término suave frente al resto.
+    
+    Returns:
+        pd.DataFrame: Tabla con índices de concurvidad (0=Indep, 1=Redundante).
+    """
+    # Asegurar formato numpy y dimensiones
     X = np.asarray(X)
     n_features = X.shape[1]
 
     if feature_names is None:
         feature_names = [f"x{i}" for i in range(n_features)]
 
+    # --- 1) Intentar usar concurvity nativa de pygam ---
+    stats = _safe_get_statistics(gam)
+    if isinstance(stats, dict) and "concurv" in stats:
+        conc = np.asarray(stats["concurv"]).ravel()
+        if len(conc) == n_features:
+            return pd.DataFrame({
+                "feature": feature_names,
+                "concurvity": conc,
+                "source": "pygam_statistics"
+            })
+
+    # --- 2) Método aproximado (R^2 entre términos) ---
     scores = []
 
-    # Para cada término j:
     for j in range(n_features):
         try:
-            # --- CORRECCIÓN CLAVE ---
-            # Usamos argumentos POSICIONALES para evitar problemas de nombres.
-            # El primer argumento es el término (j), el argumento 'X' es la data.
-            # .ravel() aplana el resultado a 1D.
+            # Obtener la contribución del término j (f_j)
+            # .ravel() es crucial para asegurar 1D array
             f_j = gam.partial_dependence(term=j, X=X).ravel()
 
-            # Obtener los otros términos para comparar
+            # Obtener contribuciones de los otros términos (f_-j)
             others = []
             for k in range(n_features):
                 if k != j:
@@ -50,15 +85,13 @@ def compute_concurvity(
                     others.append(val)
             
             if not others:
-                # Si solo hay 1 variable, no hay concurvidad
                 scores.append(0.0)
                 continue
 
-            # Matriz de los "otros" términos
+            # Matriz de diseño de los "otros" términos
             F = np.column_stack(others)
             
-            # Regresión Lineal: f_j ~ Intercept + Otros
-            # Esto mide qué tanto se parece f_j a los otros
+            # Regresión Lineal Auxiliar: f_j ~ Intercept + f_others
             F_aug = np.column_stack([np.ones(F.shape[0]), F])
             
             # Resolver mínimos cuadrados (OLS)
@@ -73,11 +106,11 @@ def compute_concurvity(
             scores.append(r2)
 
         except Exception as e:
-            print(f"Advertencia en variable '{feature_names[j]}': {e}")
+            # En caso de error (ej. término no suave), reportar NaN
             scores.append(np.nan)
 
     return pd.DataFrame({
         "feature": feature_names,
         "concurvity": scores,
-        "threshold": 0.5  # Referencia de Walker et al. (2023)
+        "threshold": 0.5  # Criterio Walker et al. (2023)
     })
