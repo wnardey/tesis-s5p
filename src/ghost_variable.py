@@ -112,85 +112,69 @@ class GhostVariableAnalyzer:
 
 def plot_heatmap(results_dict: Dict[str, pd.DataFrame], features: List[str]):
     """
-    Genera un mapa de calor de importancia de variables con estética de publicación académica.
+    Genera un mapa de calor de importancia con estética de tesis monocromática azul.
     """
     if not results_dict:
         print("No hay resultados para graficar.")
         return
 
-    # --- 1. CONFIGURACIÓN DE ESTILO (Tesis Mode) ---
+    # --- 1. CONFIGURACIÓN DE ESTILO (Sobrio y Académico) ---
     sns.set_theme(style="white", context="paper", font_scale=1.1)
     plt.rcParams["font.family"] = "serif"
-    plt.rcParams["axes.grid"] = False # El heatmap no necesita grid de fondo, usa el suyo propio
+    plt.rcParams["axes.grid"] = False
 
     # --- 2. PREPARACIÓN DE DATOS ---
     gases = list(results_dict.keys())
-    
-    # Crear DataFrame vacío para facilitar manejo
     df_matrix = pd.DataFrame(index=features, columns=gases, dtype=float)
 
-    # Llenar la matriz
     for gas in gases:
         df = results_dict[gas]
-        if df.empty: 
-            continue
-        
-        # Extraer valor para cada feature
+        if df.empty: continue
         for feat in features:
             row = df[df["var"] == feat]
-            if not row.empty:
-                val = row["delta_r2"].iloc[0]
-                df_matrix.loc[feat, gas] = val
-            else:
-                df_matrix.loc[feat, gas] = 0.0
+            val = row["delta_r2"].iloc[0] if not row.empty else 0.0
+            df_matrix.loc[feat, gas] = val
 
-    # --- 3. NORMALIZACIÓN (Por Columna/Gas) ---
-    # Dividimos cada columna por su máximo para que el rango sea 0-1
-    # Esto es crucial para comparar la importancia relativa
+    # --- 3. NORMALIZACIÓN ---
     df_normalized = df_matrix.apply(lambda x: x / x.max() if x.max() > 0 else x, axis=0)
 
-    # --- 4. MAPEO DE NOMBRES (Latex y Limpieza) ---
-    # Diccionario para embellecer los nombres de los gases
-    label_map = {
-        "NO2": r"$\bf{NO_2}$",
-        "CO": r"$\bf{CO}$",
-        "CH4": r"$\bf{CH_4}$",
-        "O3_TCL": r"$\bf{O_3}$"
-    }
+    # --- 4. MAPEO DE NOMBRES ---
+    label_map = {"NO2": r"$\bf{NO_2}$", "CO": r"$\bf{CO}$", "CH4": r"$\bf{CH_4}$", "O3_TCL": r"$\bf{O_3}$"}
     xticklabels = [label_map.get(g, g) for g in df_normalized.columns]
 
-    # --- 5. GRAFICADO ---
-    fig, ax = plt.subplots(figsize=(9, 7)) # Un poco más ancho para las etiquetas
+    # --- 5. GRAFICADO (Con Paleta Sobria) ---
+    fig, ax = plt.subplots(figsize=(9, 7))
 
     heatmap = sns.heatmap(
         df_normalized,
         annot=True,
-        fmt=".2f",           # 2 decimales
-        cmap="viridis",      # Escala perceptualmente uniforme (Estándar científico)
+        fmt=".2f",
+        cmap="Blues",   # Paleta monocromática azul (0=claro, 1=oscuro)
         vmin=0, vmax=1,
-        linewidths=0.5,      # Líneas blancas separadoras (Toque elegante)
-        linecolor='white',
+        linewidths=0.5,
+        linecolor='#f0f0f0', # Un gris muy claro para las líneas separadoras
         cbar_kws={'label': 'Importancia Relativa (0-1)', 'shrink': 0.8},
-        annot_kws={"size": 10}, # Tamaño de los números dentro
+        annot_kws={"size": 10, "weight": "bold"}, # Números en negrita para lectura fácil
         ax=ax
     )
 
     # --- 6. DECORACIÓN FINAL ---
     ax.set_title("Importancia Relativa de Variables (Método Ghost)\nDelta R² Normalizado", 
-                 fontsize=14, pad=20, fontweight="bold")
+                 fontsize=14, pad=20, fontweight="bold", color="#333333")
     
     # Ejes
-    ax.set_xticklabels(xticklabels, rotation=0, fontsize=12) # Horizontal es más legible
+    ax.set_xticklabels(xticklabels, rotation=0, fontsize=12)
     ax.set_yticklabels(df_normalized.index, rotation=0, fontsize=11)
-    
-    # Quitar etiquetas genéricas de los ejes X e Y para limpieza
     ax.set_ylabel("") 
     ax.set_xlabel("")
 
-    # Marco de la figura (Spines)
-    for _, spine in ax.spines.items():
-        spine.set_visible(True)
-        spine.set_color('#dddddd')
+    # Color de texto dinámico para contraste (Blanco sobre azul oscuro, Negro sobre azul claro)
+    for text in ax.texts:
+        val = float(text.get_text())
+        if val > 0.6:
+            text.set_color("white")
+        else:
+            text.set_color("black")
 
     plt.tight_layout()
     plt.show()
