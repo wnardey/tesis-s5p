@@ -74,3 +74,6 @@ conf/credentials.yaml
 
 # Permitir CSV procesados en el repo
 !data/processed/*.csv
+
+# Permitir CSV procesados en el repo
+!data/processed/*.csv
