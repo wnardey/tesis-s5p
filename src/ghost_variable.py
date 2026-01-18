@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pygam import LinearGAM
 from typing import List, Optional, Tuple, Dict
+import seaborn as sns
 
 class GhostVariableAnalyzer:
     """
@@ -110,47 +111,87 @@ class GhostVariableAnalyzer:
         return pd.DataFrame(results).sort_values("delta_r2", ascending=False)
 
 def plot_heatmap(results_dict: Dict[str, pd.DataFrame], features: List[str]):
-    """Genera el mapa de calor normalizado a partir de los resultados."""
+    """
+    Genera un mapa de calor de importancia de variables con estética de publicación académica.
+    """
     if not results_dict:
         print("No hay resultados para graficar.")
         return
 
+    # --- 1. CONFIGURACIÓN DE ESTILO (Tesis Mode) ---
+    sns.set_theme(style="white", context="paper", font_scale=1.1)
+    plt.rcParams["font.family"] = "serif"
+    plt.rcParams["axes.grid"] = False # El heatmap no necesita grid de fondo, usa el suyo propio
+
+    # --- 2. PREPARACIÓN DE DATOS ---
     gases = list(results_dict.keys())
-    matrix = np.zeros((len(features), len(gases)))
+    
+    # Crear DataFrame vacío para facilitar manejo
+    df_matrix = pd.DataFrame(index=features, columns=gases, dtype=float)
 
-    # Llenar matriz
-    for j, gas in enumerate(gases):
+    # Llenar la matriz
+    for gas in gases:
         df = results_dict[gas]
-        if df.empty: continue
+        if df.empty: 
+            continue
         
-        # Normalización Min-Max por columna (por gas) para comparabilidad
-        max_val = df["delta_r2"].max()
-        if max_val > 0:
-            for i, feat in enumerate(features):
-                row = df[df["var"] == feat]
-                if not row.empty:
-                    val = row["delta_r2"].iloc[0]
-                    matrix[i, j] = val / max_val
+        # Extraer valor para cada feature
+        for feat in features:
+            row = df[df["var"] == feat]
+            if not row.empty:
+                val = row["delta_r2"].iloc[0]
+                df_matrix.loc[feat, gas] = val
+            else:
+                df_matrix.loc[feat, gas] = 0.0
 
-    # Plotting
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(matrix, aspect="auto", cmap="viridis", origin="upper") # Viridis o Magma
+    # --- 3. NORMALIZACIÓN (Por Columna/Gas) ---
+    # Dividimos cada columna por su máximo para que el rango sea 0-1
+    # Esto es crucial para comparar la importancia relativa
+    df_normalized = df_matrix.apply(lambda x: x / x.max() if x.max() > 0 else x, axis=0)
 
-    # Decoración
-    ax.set_xticks(np.arange(len(gases)))
-    ax.set_yticks(np.arange(len(features)))
-    ax.set_xticklabels([g.replace("_TCL", "") for g in gases], weight='bold')
-    ax.set_yticklabels(features)
-    ax.set_title("Importancia Relativa de Variables (Método Ghost)\nDelta R² Normalizado", pad=20)
+    # --- 4. MAPEO DE NOMBRES (Latex y Limpieza) ---
+    # Diccionario para embellecer los nombres de los gases
+    label_map = {
+        "NO2": r"$\bf{NO_2}$",
+        "CO": r"$\bf{CO}$",
+        "CH4": r"$\bf{CH_4}$",
+        "O3_TCL": r"$\bf{O_3}$"
+    }
+    xticklabels = [label_map.get(g, g) for g in df_normalized.columns]
 
-    # Anotaciones
-    for i in range(len(features)):
-        for j in range(len(gases)):
-            val = matrix[i, j]
-            color = "white" if val < 0.6 else "black"
-            ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color, fontsize=9)
+    # --- 5. GRAFICADO ---
+    fig, ax = plt.subplots(figsize=(9, 7)) # Un poco más ancho para las etiquetas
 
-    plt.colorbar(im, label="Importancia Relativa (0-1)")
+    heatmap = sns.heatmap(
+        df_normalized,
+        annot=True,
+        fmt=".2f",           # 2 decimales
+        cmap="viridis",      # Escala perceptualmente uniforme (Estándar científico)
+        vmin=0, vmax=1,
+        linewidths=0.5,      # Líneas blancas separadoras (Toque elegante)
+        linecolor='white',
+        cbar_kws={'label': 'Importancia Relativa (0-1)', 'shrink': 0.8},
+        annot_kws={"size": 10}, # Tamaño de los números dentro
+        ax=ax
+    )
+
+    # --- 6. DECORACIÓN FINAL ---
+    ax.set_title("Importancia Relativa de Variables (Método Ghost)\nDelta R² Normalizado", 
+                 fontsize=14, pad=20, fontweight="bold")
+    
+    # Ejes
+    ax.set_xticklabels(xticklabels, rotation=0, fontsize=12) # Horizontal es más legible
+    ax.set_yticklabels(df_normalized.index, rotation=0, fontsize=11)
+    
+    # Quitar etiquetas genéricas de los ejes X e Y para limpieza
+    ax.set_ylabel("") 
+    ax.set_xlabel("")
+
+    # Marco de la figura (Spines)
+    for _, spine in ax.spines.items():
+        spine.set_visible(True)
+        spine.set_color('#dddddd')
+
     plt.tight_layout()
     plt.show()
 
